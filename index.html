@@ -1,0 +1,470 @@
+"""
+Janela principal do NexusLauncher.
+Layout: carrossel de jogos + painel de detalhes + background dinâmico.
+"""
+import os
+from typing import Optional
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
+    QStackedWidget, QLabel, QPushButton, QFrame, QSizePolicy,
+    QLineEdit, QMenu, QMenuBar, QMessageBox, QApplication,
+)
+from PySide6.QtCore import Qt, QTimer, QSize, Signal
+from PySide6.QtGui import QPixmap, QAction, QFont, QColor, QPainter, QIcon
+
+from core.constants import APP_NAME, WINDOW_WIDTH, WINDOW_HEIGHT
+from database.db_manager import DatabaseManager
+from database.models import Game as GameModel, SaveProfile as SaveProfileModel
+from models.game import GameData
+from ui.styles.theme import STYLESHEET
+from ui.widgets.game_carousel import GameCarousel
+from ui.widgets.game_detail_panel import GameDetailPanel
+from ui.widgets.add_game_dialog import AddGameDialog
+from ui.widgets.settings_dialog import SettingsDialog
+from ui.widgets.toast_widget import ToastWidget
+from ui.widgets.loading_screen import LoadingScreen
+
+
+def _game_model_to_data(g: GameModel) -> GameData:
+    return GameData(
+        id=g.id, name=g.name, executable_path=g.executable_path,
+        save_folder=g.save_folder or "", banner_path=g.banner_path or "",
+        cover_path=g.cover_path or "", icon_path=g.icon_path or "",
+        description=g.description or "", genre=g.genre or "",
+        platform=g.platform or "PC", developer=g.developer or "",
+        publisher=g.publisher or "", release_date=g.release_date or "",
+        total_playtime_seconds=g.total_playtime_seconds or 0,
+        last_played=g.last_played, is_favorite=g.is_favorite or False,
+        category=g.category or "Uncategorized",
+        rawg_id=g.rawg_id, background_url=g.background_url or "",
+        added_at=g.added_at,
+    )
+
+
+class MainWindow(QMainWindow):
+    """Janela principal do launcher."""
+
+    def __init__(self, db, settings, metadata_service, image_service,
+                 play_tracker, save_watcher, sync_manager,
+                 notification_service):
+        super().__init__()
+        self.db = db
+        self.settings = settings
+        self.metadata_service = metadata_service
+        self.image_service = image_service
+        self.play_tracker = play_tracker
+        self.save_watcher = save_watcher
+        self.sync_manager = sync_manager
+        self.notification_service = notification_service
+
+        self.setWindowTitle(APP_NAME)
+        self.setMinimumSize(1024, 700)
+        self.setStyleSheet(STYLESHEET)
+
+        self._current_game: Optional[GameData] = None
+        self._all_games: list[GameData] = []
+
+        self._build_ui()
+        self._build_menu()
+        self._connect_signals()
+        self._load_games()
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+
+        # Background dinâmico
+        self._bg_label = QLabel(central)
+        self._bg_label.setScaledContents(True)
+        self._bg_label.setStyleSheet("background: transparent;")
+
+        # Overlay gradiente
+        self._overlay = QFrame(central)
+        self._overlay.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(13,13,13,240),
+                    stop:0.3 rgba(13,13,13,200),
+                    stop:0.7 rgba(13,13,13,180),
+                    stop:1 rgba(13,13,13,250)
+                );
+            }
+        """)
+
+        # Layout principal
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Top bar
+        top_bar = QFrame()
+        top_bar.setFixedHeight(56)
+        top_bar.setStyleSheet("background: rgba(0,0,0,0.4);")
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(20, 0, 20, 0)
+
+        # Logo
+        logo = QLabel(APP_NAME)
+        logo.setStyleSheet(
+            "font-family: 'Bebas Neue', 'Impact', sans-serif; "
+            "font-size: 24px; color: #e8c547; letter-spacing: 3px; "
+            "background: transparent;"
+        )
+        top_layout.addWidget(logo)
+        top_layout.addStretch()
+
+        # Busca
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("Buscar jogos...")
+        self._search_input.setFixedWidth(250)
+        self._search_input.textChanged.connect(self._on_search)
+        top_layout.addWidget(self._search_input)
+
+        # Botão adicionar
+        add_btn = QPushButton("+  Adicionar")
+        add_btn.clicked.connect(self._add_game)
+        top_layout.addWidget(add_btn)
+
+        # Botão config
+        config_btn = QPushButton("⚙")
+        config_btn.setFixedSize(40, 40)
+        config_btn.clicked.connect(self._open_settings)
+        top_layout.addWidget(config_btn)
+
+        main_layout.addWidget(top_bar)
+
+        # Stack: loading / conteúdo
+        self._stack = QStackedWidget()
+
+        # Loading screen
+        self._loading = LoadingScreen(self, "Carregando biblioteca")
+        self._stack.addWidget(self._loading)
+
+        # Conteúdo principal
+        content_widget = QWidget()
+        content_widget.setStyleSheet("background: transparent;")
+        content_layout = QHBoxLayout(content_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        # Splitter: detalhes | carrossel
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setHandleWidth(0)
+        splitter.setStyleSheet("QSplitter { background: transparent; border: none; }")
+
+        # Painel de detalhes
+        self._detail_panel = GameDetailPanel()
+        splitter.addWidget(self._detail_panel)
+
+        # Carrossel
+        self._carousel = GameCarousel()
+        self._carousel.setFixedHeight(380)
+        splitter.addWidget(self._carousel)
+
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+
+        content_layout.addWidget(splitter)
+        self._stack.addWidget(content_widget)
+
+        main_layout.addWidget(self._stack)
+        self._stack.setCurrentIndex(1)
+
+        # Toast
+        self._toast = ToastWidget(self)
+
+    def _build_menu(self):
+        menu_bar = self.menuBar()
+        menu_bar.setStyleSheet("""
+            QMenuBar {
+                background: rgba(0,0,0,0.3);
+                color: #aaa;
+                font-size: 12px;
+            }
+            QMenuBar::item:selected { background: #222; color: #fff; }
+        """)
+
+        # Menu Jogos
+        jogos_menu = menu_bar.addMenu("Jogos")
+
+        add_action = QAction("Adicionar Jogo", self)
+        add_action.setShortcut("Ctrl+N")
+        add_action.triggered.connect(self._add_game)
+        jogos_menu.addAction(add_action)
+
+        jogos_menu.addSeparator()
+
+        refresh_action = QAction("Atualizar Biblioteca", self)
+        refresh_action.setShortcut("F5")
+        refresh_action.triggered.connect(self._load_games)
+        jogos_menu.addAction(refresh_action)
+
+        jogos_menu.addSeparator()
+
+        quit_action = QAction("Sair", self)
+        quit_action.setShortcut("Ctrl+Q")
+        quit_action.triggered.connect(QApplication.quit)
+        jogos_menu.addAction(quit_action)
+
+        # Menu Configurações
+        settings_menu = menu_bar.addMenu("Configurações")
+
+        prefs_action = QAction("Preferências", self)
+        prefs_action.triggered.connect(self._open_settings)
+        settings_menu.addAction(prefs_action)
+
+        # Menu Ajuda
+        help_menu = menu_bar.addMenu("Ajuda")
+
+        about_action = QAction("Sobre", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+
+    def _connect_signals(self):
+        # Carrossel → detalhes
+        self._carousel.game_selected.connect(self._on_game_selected)
+
+        # Detalhes → ações
+        self._detail_panel.play_requested.connect(self._on_play)
+        self._detail_panel.favorite_toggled.connect(self._on_toggle_favorite)
+        self._detail_panel.settings_requested.connect(self._on_game_settings)
+
+        # Notificações → toast
+        self.notification_service.toast_requested.connect(self._toast.show_toast)
+
+        # Play tracker
+        self.play_tracker.game_launched.connect(
+            lambda gid: self.notification_service.info("Jogo iniciado!")
+        )
+        self.play_tracker.game_closed.connect(self._on_game_closed)
+
+        # Save watcher
+        self.save_watcher.sync_started.connect(
+            lambda gid: self.notification_service.info("Sincronizando saves...")
+        )
+        self.save_watcher.sync_completed.connect(self._on_sync_done)
+
+    def _load_games(self):
+        """Carrega todos os jogos do banco e popula o carrossel."""
+        self._all_games.clear()
+
+        with self.db.session() as sess:
+            games = sess.query(GameModel).order_by(
+                GameModel.is_favorite.desc(),
+                GameModel.last_played.desc().nullslast(),
+                GameModel.name,
+            ).all()
+
+            for g in games:
+                self._all_games.append(_game_model_to_data(g))
+
+        self._carousel.set_games(self._all_games)
+
+        # Restaura último selecionado
+        last_id = self.settings.get("last_selected_game_id")
+        if last_id:
+            for i, g in enumerate(self._all_games):
+                if g.id == last_id:
+                    self._on_game_selected(g)
+                    return
+
+        if self._all_games:
+            self._on_game_selected(self._all_games[0])
+
+    def _on_game_selected(self, game: GameData):
+        self._current_game = game
+        self._detail_panel.set_game(game)
+        self.settings.set("last_selected_game_id", game.id)
+
+        # Atualiza status de sync
+        status = self.sync_manager.get_sync_status(game.name)
+        if status["synced"]:
+            from utils.helpers import human_readable_size
+            self._detail_panel.update_sync_status(
+                True, f"{status['files']} arquivos ({human_readable_size(status['size'])})"
+            )
+        else:
+            self._detail_panel.update_sync_status(False, "Não sincronizado")
+
+        # Background dinâmico
+        self._update_background(game)
+
+    def _update_background(self, game: GameData):
+        """Atualiza o background da janela com a imagem do jogo."""
+        bg_path = game.background_url or game.banner_path
+        if bg_path and os.path.exists(bg_path):
+            pixmap = QPixmap(bg_path)
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(
+                    self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+                )
+                self._bg_label.setPixmap(scaled)
+                self._bg_label.setGeometry(0, 0, self.width(), self.height())
+                self._bg_label.lower()
+                self._overlay.setGeometry(0, 0, self.width(), self.height())
+                self._overlay.lower()
+                return
+
+        # Sem imagem — limpa
+        self._bg_label.clear()
+
+    def _on_play(self, game_id: int):
+        with self.db.session() as sess:
+            game = sess.get(GameModel, game_id)
+            if not game:
+                self.notification_service.error("Jogo não encontrado no banco.")
+                return
+
+            exe = game.executable_path
+            if not os.path.isfile(exe):
+                self.notification_service.error(f"Executável não encontrado:\n{exe}")
+                return
+
+            success = self.play_tracker.launch_game(game_id, exe)
+            if success:
+                self.notification_service.success(f"Iniciando {game.name}...")
+            else:
+                self.notification_service.error(f"Falha ao iniciar {game.name}")
+
+    def _on_game_closed(self, game_id: int, duration: float):
+        from utils.helpers import format_playtime
+        self._load_games()  # Atualiza horas na UI
+        self.notification_service.info(
+            f"Sessão encerrada — {format_playtime(duration)}"
+        )
+
+    def _on_toggle_favorite(self, game_id: int):
+        with self.db.session() as sess:
+            game = sess.get(GameModel, game_id)
+            if game:
+                game.is_favorite = not (game.is_favorite or False)
+        self._load_games()
+
+    def _on_game_settings(self, game_id: int):
+        """Abre diálogo de configuração de save para um jogo específico."""
+        from PySide6.QtWidgets import QFileDialog
+
+        with self.db.session() as sess:
+            game = sess.get(GameModel, game_id)
+            if not game:
+                return
+
+            current = game.save_folder or ""
+            folder = QFileDialog.getExistingDirectory(
+                self, f"Selecionar pasta de saves — {game.name}", current
+            )
+            if folder:
+                game.save_folder = folder
+
+                # Cria ou atualiza perfil de save
+                profile = sess.query(SaveProfileModel).filter_by(game_id=game_id).first()
+                if not profile:
+                    profile = SaveProfileModel(
+                        game_id=game_id,
+                        save_folder=folder,
+                        sync_enabled=self.settings.get("save_sync_enabled", False),
+                    )
+                    sess.add(profile)
+                else:
+                    profile.save_folder = folder
+
+        # Atualiza watcher
+        self.save_watcher.remove_game_watch(game_id)
+        self.save_watcher.add_game_watch(game_id, folder)
+
+        self._load_games()
+        self.notification_service.success(f"Pasta de saves configurada para {game.name}")
+
+    def _on_sync_done(self, game_id: int):
+        if self._current_game and self._current_game.id == game_id:
+            status = self.sync_manager.get_sync_status(self._current_game.name)
+            if status["synced"]:
+                from utils.helpers import human_readable_size
+                self._detail_panel.update_sync_status(
+                    True, f"{status['files']} arquivos ({human_readable_size(status['size'])})"
+                )
+
+    def _add_game(self):
+        dialog = AddGameDialog(
+            self.metadata_service, self.image_service, self
+        )
+        if dialog.exec() == AddGameDialog.Accepted and dialog.result_data:
+            data = dialog.result_data
+            self._save_new_game(data)
+
+    def _save_new_game(self, data: dict):
+        """Salva um novo jogo no banco e configura monitoramento."""
+        with self.db.session() as sess:
+            # Verifica se já existe
+            existing = sess.query(GameModel).filter_by(
+                executable_path=data["executable_path"]
+            ).first()
+            if existing:
+                self.notification_service.warning("Este jogo já está na biblioteca.")
+                return
+
+            game = GameModel(
+                name=data["name"],
+                executable_path=data["executable_path"],
+                save_folder=data.get("save_folder", ""),
+                genre=data.get("genre", ""),
+                platform=data.get("platform", "PC"),
+                developer=data.get("developer", ""),
+                description=data.get("description", ""),
+                cover_path=data.get("cover_path", ""),
+                banner_path=data.get("banner_path", ""),
+            )
+            sess.add(game)
+            sess.flush()  # Obtém o ID
+
+            game_id = game.id
+
+            # Cria perfil de save se informado
+            if data.get("save_folder"):
+                profile = SaveProfileModel(
+                    game_id=game_id,
+                    save_folder=data["save_folder"],
+                    sync_enabled=self.settings.get("save_sync_enabled", False),
+                )
+                sess.add(profile)
+
+        # Configura watcher
+        if data.get("save_folder"):
+            self.save_watcher.add_game_watch(game_id, data["save_folder"])
+
+        self._load_games()
+        self.notification_service.success(f"'{data['name']}' adicionado à biblioteca!")
+
+    def _on_search(self, text: str):
+        """Filtra jogos no carrossel por nome."""
+        query = text.strip().lower()
+        if not query:
+            self._carousel.set_games(self._all_games)
+            return
+
+        filtered = [g for g in self._all_games if query in g.name.lower()]
+        self._carousel.set_games(filtered)
+
+    def _open_settings(self):
+        dialog = SettingsDialog(self.settings, self.sync_manager, self)
+        dialog.exec()
+
+    def _show_about(self):
+        QMessageBox.about(
+            self,
+            "Sobre",
+            f"<h2 style='color: #e8c547;'>{APP_NAME}</h2>"
+            f"<p>Versão 1.0.0</p>"
+            f"<p>Game Launcher profissional com sincronização automática "
+            f"de saves via GitHub.</p>"
+            f"<p>Desenvolvido com Python + PySide6</p>",
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._bg_label.setGeometry(0, 0, self.width(), self.height())
+        self._overlay.setGeometry(0, 0, self.width(), self.height())
+        self._toast.setGeometry(
+            self.width() - 380, 20, 360, 56
+        )
