@@ -1,470 +1,1137 @@
-"""
-Janela principal do NexusLauncher.
-Layout: carrossel de jogos + painel de detalhes + background dinâmico.
-"""
-import os
-from typing import Optional
-from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QStackedWidget, QLabel, QPushButton, QFrame, QSizePolicy,
-    QLineEdit, QMenu, QMenuBar, QMessageBox, QApplication,
-)
-from PySide6.QtCore import Qt, QTimer, QSize, Signal
-from PySide6.QtGui import QPixmap, QAction, QFont, QColor, QPainter, QIcon
-
-from core.constants import APP_NAME, WINDOW_WIDTH, WINDOW_HEIGHT
-from database.db_manager import DatabaseManager
-from database.models import Game as GameModel, SaveProfile as SaveProfileModel
-from models.game import GameData
-from ui.styles.theme import STYLESHEET
-from ui.widgets.game_carousel import GameCarousel
-from ui.widgets.game_detail_panel import GameDetailPanel
-from ui.widgets.add_game_dialog import AddGameDialog
-from ui.widgets.settings_dialog import SettingsDialog
-from ui.widgets.toast_widget import ToastWidget
-from ui.widgets.loading_screen import LoadingScreen
-
-
-def _game_model_to_data(g: GameModel) -> GameData:
-    return GameData(
-        id=g.id, name=g.name, executable_path=g.executable_path,
-        save_folder=g.save_folder or "", banner_path=g.banner_path or "",
-        cover_path=g.cover_path or "", icon_path=g.icon_path or "",
-        description=g.description or "", genre=g.genre or "",
-        platform=g.platform or "PC", developer=g.developer or "",
-        publisher=g.publisher or "", release_date=g.release_date or "",
-        total_playtime_seconds=g.total_playtime_seconds or 0,
-        last_played=g.last_played, is_favorite=g.is_favorite or False,
-        category=g.category or "Uncategorized",
-        rawg_id=g.rawg_id, background_url=g.background_url or "",
-        added_at=g.added_at,
-    )
-
-
-class MainWindow(QMainWindow):
-    """Janela principal do launcher."""
-
-    def __init__(self, db, settings, metadata_service, image_service,
-                 play_tracker, save_watcher, sync_manager,
-                 notification_service):
-        super().__init__()
-        self.db = db
-        self.settings = settings
-        self.metadata_service = metadata_service
-        self.image_service = image_service
-        self.play_tracker = play_tracker
-        self.save_watcher = save_watcher
-        self.sync_manager = sync_manager
-        self.notification_service = notification_service
-
-        self.setWindowTitle(APP_NAME)
-        self.setMinimumSize(1024, 700)
-        self.setStyleSheet(STYLESHEET)
-
-        self._current_game: Optional[GameData] = None
-        self._all_games: list[GameData] = []
-
-        self._build_ui()
-        self._build_menu()
-        self._connect_signals()
-        self._load_games()
-
-    def _build_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-
-        # Background dinâmico
-        self._bg_label = QLabel(central)
-        self._bg_label.setScaledContents(True)
-        self._bg_label.setStyleSheet("background: transparent;")
-
-        # Overlay gradiente
-        self._overlay = QFrame(central)
-        self._overlay.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba(13,13,13,240),
-                    stop:0.3 rgba(13,13,13,200),
-                    stop:0.7 rgba(13,13,13,180),
-                    stop:1 rgba(13,13,13,250)
-                );
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NexusLauncher — Seu Game Launcher Definitivo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        display: ['Bebas Neue', 'sans-serif'],
+                        body: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                    colors: {
+                        nexus: {
+                            gold: '#e8c547',
+                            goldLight: '#f0d060',
+                            goldDark: '#c9a832',
+                            dark: '#0a0a0a',
+                            darker: '#050505',
+                            card: '#111111',
+                            surface: '#161616',
+                            border: '#222222',
+                            muted: '#666666',
+                        }
+                    }
+                }
             }
-        """)
+        }
+    </script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
-        # Layout principal
-        main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        html { scroll-behavior: smooth; }
 
-        # Top bar
-        top_bar = QFrame()
-        top_bar.setFixedHeight(56)
-        top_bar.setStyleSheet("background: rgba(0,0,0,0.4);")
-        top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(20, 0, 20, 0)
+        body {
+            background: #050505;
+            color: #e8e4dc;
+            font-family: 'Inter', sans-serif;
+            overflow-x: hidden;
+        }
 
-        # Logo
-        logo = QLabel(APP_NAME)
-        logo.setStyleSheet(
-            "font-family: 'Bebas Neue', 'Impact', sans-serif; "
-            "font-size: 24px; color: #e8c547; letter-spacing: 3px; "
-            "background: transparent;"
-        )
-        top_layout.addWidget(logo)
-        top_layout.addStretch()
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0a0a0a; }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #e8c547; }
 
-        # Busca
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("Buscar jogos...")
-        self._search_input.setFixedWidth(250)
-        self._search_input.textChanged.connect(self._on_search)
-        top_layout.addWidget(self._search_input)
+        /* Grain overlay */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.4'/%3E%3C/svg%3E");
+            opacity: 0.03;
+            pointer-events: none;
+            z-index: 9999;
+        }
 
-        # Botão adicionar
-        add_btn = QPushButton("+  Adicionar")
-        add_btn.clicked.connect(self._add_game)
-        top_layout.addWidget(add_btn)
+        /* Glow effect */
+        .glow-gold {
+            box-shadow: 0 0 60px rgba(232, 197, 71, 0.15), 0 0 120px rgba(232, 197, 71, 0.05);
+        }
 
-        # Botão config
-        config_btn = QPushButton("⚙")
-        config_btn.setFixedSize(40, 40)
-        config_btn.clicked.connect(self._open_settings)
-        top_layout.addWidget(config_btn)
+        .glow-text {
+            text-shadow: 0 0 40px rgba(232, 197, 71, 0.3);
+        }
 
-        main_layout.addWidget(top_bar)
+        /* Animations */
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(40px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
 
-        # Stack: loading / conteúdo
-        self._stack = QStackedWidget()
+        @keyframes fadeDown {
+            from { opacity: 0; transform: translateY(-30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
 
-        # Loading screen
-        self._loading = LoadingScreen(self, "Carregando biblioteca")
-        self._stack.addWidget(self._loading)
+        @keyframes fadeLeft {
+            from { opacity: 0; transform: translateX(-40px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
 
-        # Conteúdo principal
-        content_widget = QWidget()
-        content_widget.setStyleSheet("background: transparent;")
-        content_layout = QHBoxLayout(content_widget)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(0)
+        @keyframes fadeRight {
+            from { opacity: 0; transform: translateX(40px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
 
-        # Splitter: detalhes | carrossel
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setHandleWidth(0)
-        splitter.setStyleSheet("QSplitter { background: transparent; border: none; }")
+        @keyframes scaleIn {
+            from { opacity: 0; transform: scale(0.9); }
+            to { opacity: 1; transform: scale(1); }
+        }
 
-        # Painel de detalhes
-        self._detail_panel = GameDetailPanel()
-        splitter.addWidget(self._detail_panel)
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-12px); }
+        }
 
-        # Carrossel
-        self._carousel = GameCarousel()
-        self._carousel.setFixedHeight(380)
-        splitter.addWidget(self._carousel)
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 20px rgba(232, 197, 71, 0.2); }
+            50% { box-shadow: 0 0 40px rgba(232, 197, 71, 0.4), 0 0 80px rgba(232, 197, 71, 0.1); }
+        }
 
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
+        @keyframes slide-progress {
+            from { width: 0; }
+            to { width: 100%; }
+        }
 
-        content_layout.addWidget(splitter)
-        self._stack.addWidget(content_widget)
+        @keyframes rotate-slow {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
 
-        main_layout.addWidget(self._stack)
-        self._stack.setCurrentIndex(1)
+        @keyframes dash {
+            to { stroke-dashoffset: 0; }
+        }
 
-        # Toast
-        self._toast = ToastWidget(self)
+        .animate-fade-up {
+            opacity: 0;
+            animation: fadeUp 0.8s ease forwards;
+        }
 
-    def _build_menu(self):
-        menu_bar = self.menuBar()
-        menu_bar.setStyleSheet("""
-            QMenuBar {
-                background: rgba(0,0,0,0.3);
-                color: #aaa;
-                font-size: 12px;
+        .animate-fade-down {
+            opacity: 0;
+            animation: fadeDown 0.8s ease forwards;
+        }
+
+        .animate-fade-left {
+            opacity: 0;
+            animation: fadeLeft 0.8s ease forwards;
+        }
+
+        .animate-fade-right {
+            opacity: 0;
+            animation: fadeRight 0.8s ease forwards;
+        }
+
+        .animate-scale-in {
+            opacity: 0;
+            animation: scaleIn 0.6s ease forwards;
+        }
+
+        .delay-100 { animation-delay: 0.1s; }
+        .delay-200 { animation-delay: 0.2s; }
+        .delay-300 { animation-delay: 0.3s; }
+        .delay-400 { animation-delay: 0.4s; }
+        .delay-500 { animation-delay: 0.5s; }
+        .delay-600 { animation-delay: 0.6s; }
+        .delay-700 { animation-delay: 0.7s; }
+        .delay-800 { animation-delay: 0.8s; }
+
+        /* Hero background mesh */
+        .hero-mesh {
+            background:
+                radial-gradient(ellipse 80% 50% at 20% 40%, rgba(232, 197, 71, 0.06) 0%, transparent 60%),
+                radial-gradient(ellipse 60% 80% at 80% 20%, rgba(232, 197, 71, 0.03) 0%, transparent 50%),
+                radial-gradient(ellipse 50% 60% at 50% 80%, rgba(20, 20, 20, 0.8) 0%, transparent 60%);
+        }
+
+        /* Feature card hover */
+        .feature-card {
+            transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            border: 1px solid #1a1a1a;
+        }
+        .feature-card:hover {
+            border-color: rgba(232, 197, 71, 0.3);
+            transform: translateY(-6px);
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4), 0 0 40px rgba(232, 197, 71, 0.05);
+        }
+
+        /* Mockup window */
+        .mockup-window {
+            background: linear-gradient(135deg, #111 0%, #0a0a0a 100%);
+            border: 1px solid #222;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .mockup-titlebar {
+            background: #0d0d0d;
+            padding: 10px 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-bottom: 1px solid #1a1a1a;
+        }
+
+        .mockup-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        /* CTA Button */
+        .cta-btn {
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+        .cta-btn::before {
+            content: '';
+            position: absolute;
+            top: 0; left: -100%;
+            width: 100%; height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+            transition: left 0.5s ease;
+        }
+        .cta-btn:hover::before {
+            left: 100%;
+        }
+        .cta-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 40px rgba(232, 197, 71, 0.3);
+        }
+
+        /* Carousel mockup */
+        .carousel-card {
+            transition: all 0.3s ease;
+        }
+        .carousel-card:hover {
+            transform: scale(1.05);
+            border-color: #e8c547;
+        }
+
+        /* Section reveal on scroll */
+        .reveal {
+            opacity: 0;
+            transform: translateY(30px);
+            transition: all 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+        }
+        .reveal.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* Floating particles */
+        .particle {
+            position: absolute;
+            width: 4px;
+            height: 4px;
+            background: rgba(232, 197, 71, 0.2);
+            border-radius: 50%;
+            animation: float 6s ease-in-out infinite;
+        }
+
+        /* Nav blur */
+        .nav-blur {
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+        }
+
+        /* Step connector line */
+        .step-line {
+            background: linear-gradient(to bottom, #e8c547, transparent);
+        }
+
+        /* Stat counter */
+        .stat-number {
+            background: linear-gradient(135deg, #e8c547, #f0d060);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        /* Tech badge */
+        .tech-badge {
+            border: 1px solid #222;
+            transition: all 0.3s ease;
+        }
+        .tech-badge:hover {
+            border-color: #e8c547;
+            background: rgba(232, 197, 71, 0.05);
+        }
+
+        /* Testimonial card */
+        .testimonial-card {
+            border-left: 3px solid #e8c547;
+        }
+
+        /* Keyboard shortcut style */
+        .kbd {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-bottom-width: 2px;
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: #aaa;
+        }
+
+        /* Separator line */
+        .gold-line {
+            height: 1px;
+            background: linear-gradient(90deg, transparent, #e8c547, transparent);
+        }
+
+        /* Progress bar animation */
+        .sync-bar {
+            animation: slide-progress 2s ease infinite;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ===== NAVBAR ===== -->
+    <nav class="fixed top-0 left-0 right-0 z-50 nav-blur bg-nexus-dark/70 border-b border-nexus-border/50">
+        <div class="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+            <a href="#" class="flex items-center gap-3 group">
+                <div class="w-9 h-9 rounded-lg bg-nexus-gold flex items-center justify-center">
+                    <svg class="w-5 h-5 text-nexus-dark" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                    </svg>
+                </div>
+                <span class="font-display text-2xl tracking-wider text-white group-hover:text-nexus-gold transition-colors">NEXUSLAUNCHER</span>
+            </a>
+            <div class="hidden md:flex items-center gap-8">
+                <a href="#features" class="text-sm text-nexus-muted hover:text-white transition-colors">Recursos</a>
+                <a href="#how" class="text-sm text-nexus-muted hover:text-white transition-colors">Como Funciona</a>
+                <a href="#tech" class="text-sm text-nexus-muted hover:text-white transition-colors">Tecnologias</a>
+                <a href="#download" class="cta-btn inline-flex items-center gap-2 bg-nexus-gold text-nexus-dark font-semibold text-sm px-5 py-2.5 rounded-lg">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 15V3m0 0l-4 4m4-4l4 4M2 17l.621 2.485A2 2 0 004.561 21h14.878a2 2 0 001.94-1.515L22 17"/></svg>
+                    Download
+                </a>
+            </div>
+            <button id="mobileBtn" class="md:hidden text-white">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </button>
+        </div>
+        <!-- Mobile menu -->
+        <div id="mobileMenu" class="hidden md:hidden bg-nexus-dark/95 border-t border-nexus-border/30 px-6 py-4 space-y-3">
+            <a href="#features" class="block text-sm text-nexus-muted hover:text-white">Recursos</a>
+            <a href="#how" class="block text-sm text-nexus-muted hover:text-white">Como Funciona</a>
+            <a href="#tech" class="block text-sm text-nexus-muted hover:text-white">Tecnologias</a>
+            <a href="#download" class="block text-sm text-nexus-gold font-semibold">Download</a>
+        </div>
+    </nav>
+
+    <!-- ===== HERO ===== -->
+    <section class="relative min-h-screen flex items-center justify-center hero-mesh pt-16 overflow-hidden">
+        <!-- Floating particles -->
+        <div class="particle" style="top:15%;left:10%;animation-delay:0s"></div>
+        <div class="particle" style="top:25%;left:85%;animation-delay:1s;width:6px;height:6px"></div>
+        <div class="particle" style="top:60%;left:5%;animation-delay:2s"></div>
+        <div class="particle" style="top:70%;left:90%;animation-delay:3s;width:3px;height:3px"></div>
+        <div class="particle" style="top:40%;left:50%;animation-delay:4s;width:5px;height:5px"></div>
+        <div class="particle" style="top:80%;left:30%;animation-delay:1.5s"></div>
+
+        <!-- Decorative glow orbs -->
+        <div class="absolute top-1/4 left-1/4 w-96 h-96 bg-nexus-gold/5 rounded-full blur-[120px] pointer-events-none"></div>
+        <div class="absolute bottom-1/4 right-1/4 w-72 h-72 bg-nexus-gold/3 rounded-full blur-[100px] pointer-events-none"></div>
+
+        <div class="relative z-10 max-w-6xl mx-auto px-6 text-center">
+            <!-- Badge -->
+            <div class="animate-fade-down inline-flex items-center gap-2 bg-nexus-surface border border-nexus-border rounded-full px-4 py-1.5 mb-8">
+                <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                <span class="text-xs font-mono text-nexus-muted tracking-wider uppercase">Open Source &bull; v1.0</span>
+            </div>
+
+            <!-- Title -->
+            <h1 class="animate-fade-up font-display text-6xl sm:text-7xl md:text-8xl lg:text-9xl tracking-wider text-white leading-none mb-6 glow-text">
+                NEXUS<span class="text-nexus-gold">LAUNCHER</span>
+            </h1>
+
+            <!-- Subtitle -->
+            <p class="animate-fade-up delay-200 text-lg sm:text-xl text-nexus-muted max-w-2xl mx-auto mb-4 leading-relaxed">
+                Seu launcher de jogos definitivo. Biblioteca elegante, saves sincronizados automaticamente via GitHub, e rastreamento completo de horas jogadas.
+            </p>
+
+            <p class="animate-fade-up delay-300 text-sm text-nexus-muted/60 max-w-lg mx-auto mb-10">
+                Inspirado na experiência do PS4 e Steam. Construído com Python e PySide6.
+            </p>
+
+            <!-- CTA Buttons -->
+            <div class="animate-fade-up delay-400 flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
+                <a href="#download" class="cta-btn inline-flex items-center gap-3 bg-nexus-gold text-nexus-dark font-bold text-lg px-8 py-4 rounded-xl">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 15V3m0 0l-4 4m4-4l4 4M2 17l.621 2.485A2 2 0 004.561 21h14.878a2 2 0 001.94-1.515L22 17"/></svg>
+                    Download Grátis
+                </a>
+                <a href="#features" class="inline-flex items-center gap-2 text-nexus-muted hover:text-white border border-nexus-border hover:border-nexus-muted rounded-xl px-8 py-4 font-medium transition-all">
+                    Explorar Recursos
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 12H5m0 0l4-4m-4 4l4 4"/></svg>
+                </a>
+            </div>
+
+            <!-- Stats -->
+            <div class="animate-fade-up delay-600 grid grid-cols-3 gap-8 max-w-md mx-auto">
+                <div>
+                    <div class="font-display text-3xl text-nexus-gold stat-number">100%</div>
+                    <div class="text-xs text-nexus-muted mt-1">Open Source</div>
+                </div>
+                <div>
+                    <div class="font-display text-3xl text-nexus-gold stat-number">Real-time</div>
+                    <div class="text-xs text-nexus-muted mt-1">Save Sync</div>
+                </div>
+                <div>
+                    <div class="font-display text-3xl text-nexus-gold stat-number">0kb</div>
+                    <div class="text-xs text-nexus-muted mt-1">RAM Idle</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scroll indicator -->
+        <div class="absolute bottom-8 left-1/2 -translate-x-1/2 animate-bounce">
+            <svg class="w-5 h-5 text-nexus-muted" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 14l-7 7m0 0l-7-7"/></svg>
+        </div>
+    </section>
+
+    <!-- ===== MOCKUP PREVIEW ===== -->
+    <section class="relative py-20 bg-gradient-to-b from-nexus-darker to-nexus-dark">
+        <div class="max-w-6xl mx-auto px-6 reveal">
+            <div class="mockup-window glow-gold">
+                <div class="mockup-titlebar">
+                    <div class="mockup-dot bg-red-500"></div>
+                    <div class="mockup-dot bg-yellow-500"></div>
+                    <div class="mockup-dot bg-green-500"></div>
+                    <span class="text-xs text-nexus-muted ml-3 font-mono">NexusLauncher v1.0</span>
+                </div>
+                <div class="p-6 sm:p-10">
+                    <!-- Simulated UI -->
+                    <div class="flex flex-col lg:flex-row gap-8">
+                        <!-- Left: Detail Panel -->
+                        <div class="flex-1 space-y-5">
+                            <div class="text-xs tracking-widest text-nexus-gold uppercase font-semibold">Ação &bull; RPG &bull; Mundo Aberto</div>
+                            <div class="font-display text-4xl sm:text-5xl text-white tracking-wider">CYBERPUNK 2077</div>
+                            <div class="text-sm text-nexus-muted">CD Projekt Red</div>
+                            <p class="text-sm text-gray-400 leading-relaxed max-w-lg">Night City é uma megalópole obcecada por poder, glamour e modificações corporais. Você é V, mercenário em busca de um implante único que é a chave para a imortalidade.</p>
+                            <div class="flex gap-8 text-sm">
+                                <div>
+                                    <div class="text-xs text-nexus-muted tracking-wider uppercase mb-1">Tempo de Jogo</div>
+                                    <div class="text-white font-semibold text-lg">127h 43min</div>
+                                </div>
+                                <div>
+                                    <div class="text-xs text-nexus-muted tracking-wider uppercase mb-1">Última Sessão</div>
+                                    <div class="text-white font-semibold text-lg">Hoje, 14:30</div>
+                                </div>
+                                <div>
+                                    <div class="text-xs text-nexus-muted tracking-wider uppercase mb-1">Save Sync</div>
+                                    <div class="text-green-400 font-semibold text-lg flex items-center gap-2">
+                                        <span class="w-2 h-2 rounded-full bg-green-500"></span>
+                                        Sincronizado
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex gap-3 pt-2">
+                                <button class="bg-nexus-gold text-nexus-dark font-bold px-8 py-3 rounded-lg text-sm tracking-wider">▶ JOGAR</button>
+                                <button class="border border-nexus-border px-4 py-3 rounded-lg text-nexus-muted text-sm hover:border-nexus-gold transition">⚙ Saves</button>
+                            </div>
+                        </div>
+                        <!-- Right: Mini carousel -->
+                        <div class="lg:w-72 space-y-3">
+                            <div class="text-xs tracking-widest text-nexus-muted uppercase mb-3">Biblioteca</div>
+                            <div class="carousel-card bg-nexus-surface rounded-lg p-3 border border-nexus-gold/50 flex items-center gap-3 cursor-pointer">
+                                <div class="w-12 h-12 rounded bg-gradient-to-br from-yellow-600 to-red-700 flex-shrink-0"></div>
+                                <div>
+                                    <div class="text-sm font-semibold text-white">Elden Ring</div>
+                                    <div class="text-xs text-nexus-muted">RPG • 89h 12min</div>
+                                </div>
+                            </div>
+                            <div class="carousel-card bg-nexus-card rounded-lg p-3 border border-transparent flex items-center gap-3 cursor-pointer">
+                                <div class="w-12 h-12 rounded bg-gradient-to-br from-blue-600 to-purple-700 flex-shrink-0"></div>
+                                <div>
+                                    <div class="text-sm font-semibold text-white">GTA V</div>
+                                    <div class="text-xs text-nexus-muted">Ação • 203h 55min</div>
+                                </div>
+                            </div>
+                            <div class="carousel-card bg-nexus-card rounded-lg p-3 border border-transparent flex items-center gap-3 cursor-pointer">
+                                <div class="w-12 h-12 rounded bg-gradient-to-br from-green-600 to-teal-700 flex-shrink-0"></div>
+                                <div>
+                                    <div class="text-sm font-semibold text-white">Stardew Valley</div>
+                                    <div class="text-xs text-nexus-muted">Simulação • 45h 20min</div>
+                                </div>
+                            </div>
+                            <div class="carousel-card bg-nexus-card rounded-lg p-3 border border-transparent flex items-center gap-3 cursor-pointer">
+                                <div class="w-12 h-12 rounded bg-gradient-to-br from-pink-600 to-rose-700 flex-shrink-0"></div>
+                                <div>
+                                    <div class="text-sm font-semibold text-white">Hades</div>
+                                    <div class="text-xs text-nexus-muted">Roguelike • 32h 08min</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== FEATURES ===== -->
+    <section id="features" class="py-24 bg-nexus-dark relative">
+        <div class="absolute inset-0 bg-gradient-to-b from-transparent via-nexus-dark to-transparent pointer-events-none"></div>
+
+        <div class="relative z-10 max-w-7xl mx-auto px-6">
+            <!-- Section header -->
+            <div class="text-center mb-20 reveal">
+                <div class="text-xs tracking-widest text-nexus-gold uppercase mb-4 font-mono">Recursos</div>
+                <h2 class="font-display text-4xl sm:text-5xl md:text-6xl text-white tracking-wider mb-4">
+                    TUDO QUE VOCÊ <span class="text-nexus-gold">PRECISA</span>
+                </h2>
+                <p class="text-nexus-muted max-w-xl mx-auto">
+                    Cada funcionalidade foi pensada para a melhor experiência gamer.
+                </p>
+                <div class="gold-line max-w-xs mx-auto mt-8"></div>
+            </div>
+
+            <!-- Feature Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+
+                <!-- Feature 1 -->
+                <div class="feature-card bg-nexus-card rounded-2xl p-8 reveal">
+                    <div class="w-14 h-14 rounded-xl bg-nexus-gold/10 flex items-center justify-center mb-6">
+                        <svg class="w-7 h-7 text-nexus-gold" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                            <path d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25a2.25 2.25 0 01-2.25-2.25v-2.25z"/>
+                        </svg>
+                    </div>
+                    <h3 class="text-xl font-bold text-white mb-3">Biblioteca Inteligente</h3>
+                    <p class="text-sm text-nexus-muted leading-relaxed">
+                        Detecção automática de jogos instalados. Metadados, banners e capas baixados automaticamente via RAWG e SteamGridDB. Interface estilo PS4 com carrossel animado.
+                    </p>
+                </div>
+
+                <!-- Feature 2 -->
+                <div class="feature-card bg-nexus-card rounded-2xl p-8 reveal delay-100">
+                    <div class="w-14 h-14 rounded-xl bg-nexus-gold/10 flex items-center justify-center mb-6">
+                        <svg class="w-7 h-7 text-nexus-gold" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                            <path d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                    </div>
+                    <h3 class="text-xl font-bold text-white mb-3">Rastreamento de Horas</h3>
+                    <p class="text-sm text-nexus-muted leading-relaxed">
+                        Detecta automaticamente quando você inicia e fecha um jogo. Contabiliza horas, minutos e sessões individuais. Histórico completo de cada partida.
+                    </p>
+                </div>
+
+                <!-- Feature 3 — Principal -->
+                <div class="feature-card bg-nexus-card rounded-2xl p-8 relative overflow-hidden reveal delay-200">
+                    <div class="absolute top-0 right-0 w-24 h-24 bg-nexus-gold/5 rounded-bl-full"></div>
+                    <div class="w-14 h-14 rounded-xl bg-nexus-gold/20 flex items-center justify-center mb-6">
+                        <svg class="w-7 h-7 text-nexus-gold" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                            <path d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.233-2.33 3 3 0 013.758 3.848A3.752 3.752 0 0118 19.5H6.75z"/>
+                        </svg>
+                    </div>
+                    <div class="inline-block bg-nexus-gold/10 text-nexus-gold text-[10px] tracking-widest uppercase px-2 py-1 rounded mb-3 font-semibold">Destaque</div>
+                    <h3 class="text-xl font-bold text-white mb-3">Sync Automático de Saves</h3>
+                    <p class="text-sm text-nexus-muted leading-relaxed">
+                        Monitora sua pasta de saves em tempo real. Quando qualquer arquivo é alterado, faz commit e push automático para seu repositório GitHub privado. Nunca mais perca um save.
+                    </p>
+                </div>
+
+                <!-- Feature 4 -->
+                <div class="feature-card bg-nexus-card rounded-2xl p-8 reveal delay-300">
+                    <div class="w-14 h-14 rounded-xl bg-nexus-gold/10 flex items-center justify-center mb-6">
+                        <svg class="w-7 h-7 text-nexus-gold" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                            <path d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"/>
+                        </svg>
+                    </div>
+                    <h3 class="text-xl font-bold text-white mb-3">Backup Seguro</h3>
+                    <p class="text-sm text-nexus-muted leading-relaxed">
+                        Seus saves ficam versionados no Git. Pode reverter para qualquer ponto no histórico. Conflitos detectados automaticamente. Criptografa seu token localmente.
+                    </p>
+                </div>
+
+                <!-- Feature 5 -->
+                <div class="feature-card bg-nexus-card rounded-2xl p-8 reveal delay-400">
+                    <div class="w-14 h-14 rounded-xl bg-nexus-gold/10 flex items-center justify-center mb-6">
+                        <svg class="w-7 h-7 text-nexus-gold" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                            <path d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/>
+                        </svg>
+                    </div>
+                    <h3 class="text-xl font-bold text-white mb-3">Busca e Categorias</h3>
+                    <p class="text-sm text-nexus-muted leading-relaxed">
+                        Encontre qualquer jogo instantaneamente. Organize por categorias, favoritos, gêneros e plataforma. Ordenação inteligente por recentemente jogado.
+                    </p>
+                </div>
+
+                <!-- Feature 6 -->
+                <div class="feature-card bg-nexus-card rounded-2xl p-8 reveal delay-500">
+                    <div class="w-14 h-14 rounded-xl bg-nexus-gold/10 flex items-center justify-center mb-6">
+                        <svg class="w-7 h-7 text-nexus-gold" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                            <path d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"/>
+                            <path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                        </svg>
+                    </div>
+                    <h3 class="text-xl font-bold text-white mb-3">Totalmente Configurável</h3>
+                    <p class="text-sm text-nexus-muted leading-relaxed">
+                        Tema escuro moderno. Configurações granulares. Logs detalhados. Notificações toast em tempo real. Interface responsiva em tela cheia.
+                    </p>
+                </div>
+
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== HOW IT WORKS ===== -->
+    <section id="how" class="py-24 bg-nexus-darker relative overflow-hidden">
+        <!-- Background decoration -->
+        <div class="absolute top-0 right-0 w-1/3 h-full bg-gradient-to-l from-nexus-gold/[0.02] to-transparent pointer-events-none"></div>
+
+        <div class="relative z-10 max-w-6xl mx-auto px-6">
+            <div class="text-center mb-20 reveal">
+                <div class="text-xs tracking-widest text-nexus-gold uppercase mb-4 font-mono">Simples</div>
+                <h2 class="font-display text-4xl sm:text-5xl md:text-6xl text-white tracking-wider mb-4">
+                    COMO <span class="text-nexus-gold">FUNCIONA</span>
+                </h2>
+                <p class="text-nexus-muted max-w-xl mx-auto">
+                    4 passos para ter seu launcher completo com sync de saves.
+                </p>
+                <div class="gold-line max-w-xs mx-auto mt-8"></div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
+                <!-- Step 1 -->
+                <div class="relative reveal">
+                    <div class="text-7xl font-display text-nexus-gold/10 mb-4">01</div>
+                    <div class="w-10 h-10 rounded-full bg-nexus-gold text-nexus-dark font-bold text-sm flex items-center justify-center mb-4">1</div>
+                    <h3 class="text-lg font-bold text-white mb-2">Instale o App</h3>
+                    <p class="text-sm text-nexus-muted leading-relaxed">
+                        Clone o repositório do GitHub, instale as dependências e execute <span class="kbd">python main.py</span>.
+                    </p>
+                </div>
+
+                <!-- Step 2 -->
+                <div class="relative reveal delay-200">
+                    <div class="text-7xl font-display text-nexus-gold/10 mb-4">02</div>
+                    <div class="w-10 h-10 rounded-full bg-nexus-gold text-nexus-dark font-bold text-sm flex items-center justify-center mb-4">2</div>
+                    <h3 class="text-lg font-bold text-white mb-2">Adicione Jogos</h3>
+                    <p class="text-sm text-nexus-muted leading-relaxed">
+                        Selecione o executável. O launcher detecta automaticamente o jogo e baixa metadados e imagens.
+                    </p>
+                </div>
+
+                <!-- Step 3 -->
+                <div class="relative reveal delay-400">
+                    <div class="text-7xl font-display text-nexus-gold/10 mb-4">03</div>
+                    <div class="w-10 h-10 rounded-full bg-nexus-gold text-nexus-dark font-bold text-sm flex items-center justify-center mb-4">3</div>
+                    <h3 class="text-lg font-bold text-white mb-2">Configure o Sync</h3>
+                    <p class="text-sm text-nexus-muted leading-relaxed">
+                        Informe seu repo GitHub e token. Selecione a pasta de saves de cada jogo. Pronto.
+                    </p>
+                </div>
+
+                <!-- Step 4 -->
+                <div class="relative reveal delay-600">
+                    <div class="text-7xl font-display text-nexus-gold/10 mb-4">04</div>
+                    <div class="w-10 h-10 rounded-full bg-nexus-gold text-nexus-dark font-bold text-sm flex items-center justify-center mb-4">4</div>
+                    <h3 class="text-lg font-bold text-white mb-2">Jogue e Relaxa</h3>
+                    <p class="text-sm text-nexus-muted leading-relaxed">
+                        Suas horas são rastreadas e seus saves são sincronizados automaticamente em tempo real. Zero esforço.
+                    </p>
+                </div>
+            </div>
+
+            <!-- Sync flow visualization -->
+            <div class="mt-20 reveal">
+                <div class="mockup-window max-w-3xl mx-auto">
+                    <div class="mockup-titlebar">
+                        <div class="mockup-dot bg-red-500"></div>
+                        <div class="mockup-dot bg-yellow-500"></div>
+                        <div class="mockup-dot bg-green-500"></div>
+                        <span class="text-xs text-nexus-muted ml-3 font-mono">Sync em tempo real</span>
+                    </div>
+                    <div class="p-6 space-y-4 font-mono text-sm">
+                        <div class="flex items-center gap-3 text-green-400">
+                            <span class="text-nexus-muted">14:32:01</span>
+                            <span class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
+                            <span>Alteração detectada em <span class="text-white">C:\Saves\Cyberpunk2077\save.dat</span></span>
+                        </div>
+                        <div class="flex items-center gap-3 text-yellow-400">
+                            <span class="text-nexus-muted">14:32:04</span>
+                            <span class="w-2 h-2 rounded-full bg-yellow-500 flex-shrink-0"></span>
+                            <span>Debounce concluído — preparando sync...</span>
+                        </div>
+                        <div class="flex items-center gap-3 text-blue-400">
+                            <span class="text-nexus-muted">14:32:05</span>
+                            <span class="w-2 h-2 rounded-full bg-blue-500 flex-shrink-0"></span>
+                            <span>git add Saves/Cyberpunk2077/</span>
+                        </div>
+                        <div class="flex items-center gap-3 text-blue-400">
+                            <span class="text-nexus-muted">14:32:05</span>
+                            <span class="w-2 h-2 rounded-full bg-blue-500 flex-shrink-0"></span>
+                            <span>git commit -m "Auto-sync: Cyberpunk 2077 saves"</span>
+                        </div>
+                        <div class="flex items-center gap-3 text-green-400">
+                            <span class="text-nexus-muted">14:32:07</span>
+                            <span class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
+                            <span>✓ Push concluído — saves seguros no GitHub</span>
+                        </div>
+                        <div class="flex items-center gap-3 text-green-400">
+                            <span class="text-nexus-muted">14:32:07</span>
+                            <span class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
+                            <span class="text-nexus-gold">✓ Toast: "Saves de Cyberpunk 2077 sincronizados!"</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== TECH STACK ===== -->
+    <section id="tech" class="py-24 bg-nexus-dark relative">
+        <div class="max-w-6xl mx-auto px-6">
+            <div class="text-center mb-16 reveal">
+                <div class="text-xs tracking-widest text-nexus-gold uppercase mb-4 font-mono">Stack</div>
+                <h2 class="font-display text-4xl sm:text-5xl md:text-6xl text-white tracking-wider mb-4">
+                    CONSTRUÍDO COM <span class="text-nexus-gold">CRAFT</span>
+                </h2>
+                <div class="gold-line max-w-xs mx-auto mt-8"></div>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 reveal">
+                <div class="tech-badge rounded-xl p-5 text-center bg-nexus-card hover:bg-nexus-surface transition-all">
+                    <div class="text-2xl mb-2">🐍</div>
+                    <div class="text-sm font-semibold text-white">Python</div>
+                    <div class="text-xs text-nexus-muted mt-1">Core Language</div>
+                </div>
+                <div class="tech-badge rounded-xl p-5 text-center bg-nexus-card hover:bg-nexus-surface transition-all">
+                    <div class="text-2xl mb-2">🖥️</div>
+                    <div class="text-sm font-semibold text-white">PySide6</div>
+                    <div class="text-xs text-nexus-muted mt-1">UI Framework</div>
+                </div>
+                <div class="tech-badge rounded-xl p-5 text-center bg-nexus-card hover:bg-nexus-surface transition-all">
+                    <div class="text-2xl mb-2">🗃️</div>
+                    <div class="text-sm font-semibold text-white">SQLite</div>
+                    <div class="text-xs text-nexus-muted mt-1">Database</div>
+                </div>
+                <div class="tech-badge rounded-xl p-5 text-center bg-nexus-card hover:bg-nexus-surface transition-all">
+                    <div class="text-2xl mb-2">🔀</div>
+                    <div class="text-sm font-semibold text-white">GitPython</div>
+                    <div class="text-xs text-nexus-muted mt-1">GitHub Sync</div>
+                </div>
+                <div class="tech-badge rounded-xl p-5 text-center bg-nexus-card hover:bg-nexus-surface transition-all">
+                    <div class="text-2xl mb-2">👁️</div>
+                    <div class="text-sm font-semibold text-white">Watchdog</div>
+                    <div class="text-xs text-nexus-muted mt-1">File Monitor</div>
+                </div>
+                <div class="tech-badge rounded-xl p-5 text-center bg-nexus-card hover:bg-nexus-surface transition-all">
+                    <div class="text-2xl mb-2">🌐</div>
+                    <div class="text-sm font-semibold text-white">Requests</div>
+                    <div class="text-xs text-nexus-muted mt-1">HTTP Client</div>
+                </div>
+                <div class="tech-badge rounded-xl p-5 text-center bg-nexus-card hover:bg-nexus-surface transition-all">
+                    <div class="text-2xl mb-2">🖼️</div>
+                    <div class="text-sm font-semibold text-white">Pillow</div>
+                    <div class="text-xs text-nexus-muted mt-1">Image Processing</div>
+                </div>
+                <div class="tech-badge rounded-xl p-5 text-center bg-nexus-card hover:bg-nexus-surface transition-all">
+                    <div class="text-2xl mb-2">⚙️</div>
+                    <div class="text-sm font-semibold text-white">SQLAlchemy</div>
+                    <div class="text-xs text-nexus-muted mt-1">ORM</div>
+                </div>
+                <div class="tech-badge rounded-xl p-5 text-center bg-nexus-card hover:bg-nexus-surface transition-all">
+                    <div class="text-2xl mb-2">🎮</div>
+                    <div class="text-sm font-semibold text-white">RAWG API</div>
+                    <div class="text-xs text-nexus-muted mt-1">Game Metadata</div>
+                </div>
+                <div class="tech-badge rounded-xl p-5 text-center bg-nexus-card hover:bg-nexus-surface transition-all">
+                    <div class="text-2xl mb-2">🎨</div>
+                    <div class="text-sm font-semibold text-white">SteamGridDB</div>
+                    <div class="text-xs text-nexus-muted mt-1">Artwork</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== ARCHITECTURE ===== -->
+    <section class="py-24 bg-nexus-darker">
+        <div class="max-w-6xl mx-auto px-6">
+            <div class="text-center mb-16 reveal">
+                <div class="text-xs tracking-widest text-nexus-gold uppercase mb-4 font-mono">Arquitetura</div>
+                <h2 class="font-display text-4xl sm:text-5xl md:text-6xl text-white tracking-wider mb-4">
+                    CÓDIGO <span class="text-nexus-gold">LIMPO</span>
+                </h2>
+                <p class="text-nexus-muted max-w-xl mx-auto">
+                    Modular, escalável e profissional. Separação total entre UI e lógica de negócio.
+                </p>
+                <div class="gold-line max-w-xs mx-auto mt-8"></div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 reveal">
+                <!-- Modules -->
+                <div class="mockup-window">
+                    <div class="mockup-titlebar">
+                        <div class="mockup-dot bg-red-500"></div>
+                        <div class="mockup-dot bg-yellow-500"></div>
+                        <div class="mockup-dot bg-green-500"></div>
+                        <span class="text-xs text-nexus-muted ml-3 font-mono">Estrutura de Módulos</span>
+                    </div>
+                    <div class="p-5 font-mono text-xs leading-relaxed text-gray-400 space-y-1">
+                        <div><span class="text-nexus-gold">nexus_launcher/</span></div>
+                        <div class="pl-4"><span class="text-blue-400">├─</span> <span class="text-white">core/</span> <span class="text-nexus-muted">← settings, constants, lifecycle</span></div>
+                        <div class="pl-4"><span class="text-blue-400">├─</span> <span class="text-white">database/</span> <span class="text-nexus-muted">← engine, models, migrations</span></div>
+                        <div class="pl-4"><span class="text-blue-400">├─</span> <span class="text-white">models/</span> <span class="text-nexus-muted">← dataclasses, DTOs</span></div>
+                        <div class="pl-4"><span class="text-blue-400">├─</span> <span class="text-white">services/</span> <span class="text-nexus-muted">← metadata, images, tracker</span></div>
+                        <div class="pl-4"><span class="text-blue-400">├─</span> <span class="text-white">game_detection/</span> <span class="text-nexus-muted">← auto-detect installed games</span></div>
+                        <div class="pl-4"><span class="text-blue-400">├─</span> <span class="text-white">save_monitor/</span> <span class="text-nexus-muted">← watchdog real-time</span></div>
+                        <div class="pl-4"><span class="text-blue-400">├─</span> <span class="text-white">github_sync/</span> <span class="text-nexus-muted">← git auto-commit & push</span></div>
+                        <div class="pl-4"><span class="text-blue-400">├─</span> <span class="text-white">ui/</span> <span class="text-nexus-muted">← PySide6, QSS, widgets</span></div>
+                        <div class="pl-4"><span class="text-blue-400">├─</span> <span class="text-white">utils/</span> <span class="text-nexus-muted">← logger, cache, helpers</span></div>
+                        <div class="pl-4"><span class="text-blue-400">└─</span> <span class="text-white">main.py</span></div>
+                    </div>
+                </div>
+
+                <!-- Architecture principles -->
+                <div class="space-y-4">
+                    <div class="flex items-start gap-4 bg-nexus-card rounded-xl p-5 border border-nexus-border hover:border-nexus-gold/30 transition-all">
+                        <div class="w-8 h-8 rounded-lg bg-nexus-gold/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                            <svg class="w-4 h-4 text-nexus-gold" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4.5 12.75l6 6 9-13.5"/></svg>
+                        </div>
+                        <div>
+                            <div class="font-semibold text-white text-sm">Signals & Slots</div>
+                            <div class="text-xs text-nexus-muted mt-1">Comunicação entre UI e lógica via Qt signals. Zero acoplamento.</div>
+                        </div>
+                    </div>
+                    <div class="flex items-start gap-4 bg-nexus-card rounded-xl p-5 border border-nexus-border hover:border-nexus-gold/30 transition-all">
+                        <div class="w-8 h-8 rounded-lg bg-nexus-gold/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                            <svg class="w-4 h-4 text-nexus-gold" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4.5 12.75l6 6 9-13.5"/></svg>
+                        </div>
+                        <div>
+                            <div class="font-semibold text-white text-sm">Threading Assíncrono</div>
+                            <div class="text-xs text-nexus-muted mt-1">Play tracker, file watcher e sync rodam em threads separadas. UI nunca congela.</div>
+                        </div>
+                    </div>
+                    <div class="flex items-start gap-4 bg-nexus-card rounded-xl p-5 border border-nexus-border hover:border-nexus-gold/30 transition-all">
+                        <div class="w-8 h-8 rounded-lg bg-nexus-gold/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                            <svg class="w-4 h-4 text-nexus-gold" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4.5 12.75l6 6 9-13.5"/></svg>
+                        </div>
+                        <div>
+                            <div class="font-semibold text-white text-sm">Debounce Inteligente</div>
+                            <div class="text-xs text-nexus-muted mt-1">Múltiplas alterações de arquivo geram apenas 1 commit. Sem spam no Git.</div>
+                        </div>
+                    </div>
+                    <div class="flex items-start gap-4 bg-nexus-card rounded-xl p-5 border border-nexus-border hover:border-nexus-gold/30 transition-all">
+                        <div class="w-8 h-8 rounded-lg bg-nexus-gold/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                            <svg class="w-4 h-4 text-nexus-gold" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4.5 12.75l6 6 9-13.5"/></svg>
+                        </div>
+                        <div>
+                            <div class="font-semibold text-white text-sm">Cache em Disco</div>
+                            <div class="text-xs text-nexus-muted mt-1">Imagens e metadados cacheados localmente. Uma única requisição por jogo.</div>
+                        </div>
+                    </div>
+                    <div class="flex items-start gap-4 bg-nexus-card rounded-xl p-5 border border-nexus-border hover:border-nexus-gold/30 transition-all">
+                        <div class="w-8 h-8 rounded-lg bg-nexus-gold/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                            <svg class="w-4 h-4 text-nexus-gold" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4.5 12.75l6 6 9-13.5"/></svg>
+                        </div>
+                        <div>
+                            <div class="font-semibold text-white text-sm">SQLAlchemy ORM</div>
+                            <div class="text-xs text-nexus-muted mt-1">Banco relacional com migrations, session management e WAL mode.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== FAQ / COMPARISON ===== -->
+    <section class="py-24 bg-nexus-dark">
+        <div class="max-w-4xl mx-auto px-6">
+            <div class="text-center mb-16 reveal">
+                <div class="text-xs tracking-widest text-nexus-gold uppercase mb-4 font-mono">Por que NexusLauncher?</div>
+                <h2 class="font-display text-4xl sm:text-5xl text-white tracking-wider mb-4">
+                    COMPARAÇÃO
+                </h2>
+                <div class="gold-line max-w-xs mx-auto mt-8"></div>
+            </div>
+
+            <!-- Comparison table -->
+            <div class="mockup-window reveal">
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead>
+                            <tr class="border-b border-nexus-border">
+                                <th class="text-left p-4 text-nexus-muted font-medium">Recurso</th>
+                                <th class="p-4 text-center">
+                                    <span class="text-nexus-gold font-display text-lg tracking-wider">NEXUS</span>
+                                </th>
+                                <th class="p-4 text-center text-nexus-muted">Steam</th>
+                                <th class="p-4 text-center text-nexus-muted">Playnite</th>
+                            </tr>
+                        </thead>
+                        <tbody class="font-mono">
+                            <tr class="border-b border-nexus-border/50">
+                                <td class="p-4 text-gray-300">Save Sync Automático</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                                <td class="p-4 text-center text-nexus-muted">Cloud only</td>
+                                <td class="p-4 text-center text-nexus-muted">✗</td>
+                            </tr>
+                            <tr class="border-b border-nexus-border/50">
+                                <td class="p-4 text-gray-300">GitHub Integration</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                                <td class="p-4 text-center text-nexus-muted">✗</td>
+                                <td class="p-4 text-center text-nexus-muted">✗</td>
+                            </tr>
+                            <tr class="border-b border-nexus-border/50">
+                                <td class="p-4 text-gray-300">Rastreamento de Horas</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                            </tr>
+                            <tr class="border-b border-nexus-border/50">
+                                <td class="p-4 text-gray-300">Detecção Automática</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                                <td class="p-4 text-center text-nexus-muted">Steam only</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                            </tr>
+                            <tr class="border-b border-nexus-border/50">
+                                <td class="p-4 text-gray-300">Open Source</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                                <td class="p-4 text-center text-red-400">✗</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                            </tr>
+                            <tr class="border-b border-nexus-border/50">
+                                <td class="p-4 text-gray-300">Multi-plataforma stores</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                                <td class="p-4 text-center text-nexus-muted">Steam only</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                            </tr>
+                            <tr>
+                                <td class="p-4 text-gray-300">Interface Console-style</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                                <td class="p-4 text-center text-green-400">✓</td>
+                                <td class="p-4 text-center text-nexus-muted">Parcial</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== DOWNLOAD / CTA ===== -->
+    <section id="download" class="py-24 bg-nexus-darker relative overflow-hidden">
+        <!-- Glow effects -->
+        <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-nexus-gold/5 rounded-full blur-[150px] pointer-events-none"></div>
+
+        <div class="relative z-10 max-w-3xl mx-auto px-6 text-center reveal">
+            <div class="text-xs tracking-widest text-nexus-gold uppercase mb-4 font-mono">Pronto?</div>
+            <h2 class="font-display text-5xl sm:text-6xl md:text-7xl text-white tracking-wider mb-6">
+                COMECE <span class="text-nexus-gold">AGORA</span>
+            </h2>
+            <p class="text-nexus-muted text-lg max-w-lg mx-auto mb-10 leading-relaxed">
+                100% gratuito, open source, e sem conta obrigatória. Seus saves, seu controle.
+            </p>
+
+            <!-- Download button -->
+            <div class="flex flex-col sm:flex-row items-center justify-center gap-4 mb-12">
+                <a href="https://github.com/nexus-launcher/nexus-launcher" target="_blank" rel="noopener"
+                   class="cta-btn inline-flex items-center gap-3 bg-nexus-gold text-nexus-dark font-bold text-xl px-12 py-5 rounded-2xl glow-gold">
+                    <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                    </svg>
+                    Ver no GitHub
+                </a>
+            </div>
+
+            <!-- Quick start -->
+            <div class="mockup-window max-w-xl mx-auto text-left">
+                <div class="mockup-titlebar">
+                    <div class="mockup-dot bg-red-500"></div>
+                    <div class="mockup-dot bg-yellow-500"></div>
+                    <div class="mockup-dot bg-green-500"></div>
+                    <span class="text-xs text-nexus-muted ml-3 font-mono">Quick Start</span>
+                </div>
+                <div class="p-5 space-y-3 font-mono text-sm">
+                    <div class="flex items-center gap-3">
+                        <span class="text-nexus-muted select-none">$</span>
+                        <span class="text-green-400">git clone</span>
+                        <span class="text-white">https://github.com/nexus-launcher/nexus-launcher.git</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="text-nexus-muted select-none">$</span>
+                        <span class="text-green-400">cd</span>
+                        <span class="text-white">nexus-launcher</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="text-nexus-muted select-none">$</span>
+                        <span class="text-green-400">pip install</span>
+                        <span class="text-white">-r requirements.txt</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="text-nexus-muted select-none">$</span>
+                        <span class="text-green-400">python</span>
+                        <span class="text-white">main.py</span>
+                        <span class="text-nexus-gold animate-pulse">▮</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Badges -->
+            <div class="flex flex-wrap items-center justify-center gap-3 mt-10">
+                <span class="inline-flex items-center gap-1.5 bg-nexus-card border border-nexus-border rounded-full px-4 py-1.5 text-xs text-nexus-muted">
+                    <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+                    MIT License
+                </span>
+                <span class="inline-flex items-center gap-1.5 bg-nexus-card border border-nexus-border rounded-full px-4 py-1.5 text-xs text-nexus-muted">
+                    <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+                    Python 3.10+
+                </span>
+                <span class="inline-flex items-center gap-1.5 bg-nexus-card border border-nexus-border rounded-full px-4 py-1.5 text-xs text-nexus-muted">
+                    <span class="w-1.5 h-1.5 rounded-full bg-yellow-500"></span>
+                    Windows 10/11
+                </span>
+                <span class="inline-flex items-center gap-1.5 bg-nexus-card border border-nexus-border rounded-full px-4 py-1.5 text-xs text-nexus-muted">
+                    <span class="w-1.5 h-1.5 rounded-full bg-purple-500"></span>
+                    v1.0 Stable
+                </span>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== FOOTER ===== -->
+    <footer class="py-12 bg-nexus-dark border-t border-nexus-border/30">
+        <div class="max-w-6xl mx-auto px-6">
+            <div class="flex flex-col md:flex-row items-center justify-between gap-6">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 rounded-lg bg-nexus-gold flex items-center justify-center">
+                        <svg class="w-4 h-4 text-nexus-dark" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                        </svg>
+                    </div>
+                    <span class="font-display text-xl tracking-wider text-white">NEXUSLAUNCHER</span>
+                </div>
+                <div class="flex items-center gap-6 text-sm text-nexus-muted">
+                    <a href="#features" class="hover:text-white transition-colors">Recursos</a>
+                    <a href="#how" class="hover:text-white transition-colors">Como Funciona</a>
+                    <a href="#download" class="hover:text-white transition-colors">Download</a>
+                    <a href="https://github.com/nexus-launcher/nexus-launcher" target="_blank" rel="noopener" class="hover:text-white transition-colors">GitHub</a>
+                </div>
+                <div class="text-xs text-nexus-muted/50">
+                    &copy; 2025 NexusLauncher. Feito com Python e dedicação.
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- ===== SCRIPTS ===== -->
+    <script>
+        // Mobile menu toggle
+        document.getElementById('mobileBtn').addEventListener('click', () => {
+            document.getElementById('mobileMenu').classList.toggle('hidden');
+        });
+
+        // Close mobile menu on link click
+        document.querySelectorAll('#mobileMenu a').forEach(link => {
+            link.addEventListener('click', () => {
+                document.getElementById('mobileMenu').classList.add('hidden');
+            });
+        });
+
+        // Scroll reveal
+        const revealElements = document.querySelectorAll('.reveal');
+
+        const revealObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('visible');
+                    revealObserver.unobserve(entry.target);
+                }
+            });
+        }, {
+            threshold: 0.1,
+            rootMargin: '0px 0px -50px 0px'
+        });
+
+        revealElements.forEach(el => revealObserver.observe(el));
+
+        // Navbar background on scroll
+        const nav = document.querySelector('nav');
+        window.addEventListener('scroll', () => {
+            if (window.scrollY > 50) {
+                nav.classList.add('border-nexus-border/80');
+                nav.style.background = 'rgba(10, 10, 10, 0.9)';
+            } else {
+                nav.classList.remove('border-nexus-border/80');
+                nav.style.background = 'rgba(10, 10, 10, 0.7)';
             }
-            QMenuBar::item:selected { background: #222; color: #fff; }
-        """)
+        });
 
-        # Menu Jogos
-        jogos_menu = menu_bar.addMenu("Jogos")
+        // Smooth scroll for anchor links
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            });
+        });
 
-        add_action = QAction("Adicionar Jogo", self)
-        add_action.setShortcut("Ctrl+N")
-        add_action.triggered.connect(self._add_game)
-        jogos_menu.addAction(add_action)
+        // Animate stats on scroll
+        const statsObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    animateValue(entry.target);
+                    statsObserver.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.5 });
 
-        jogos_menu.addSeparator()
+        function animateValue(el) {
+            const text = el.textContent;
+            // Only animate pure numbers
+            const match = text.match(/^(\d+)/);
+            if (!match) return;
 
-        refresh_action = QAction("Atualizar Biblioteca", self)
-        refresh_action.setShortcut("F5")
-        refresh_action.triggered.connect(self._load_games)
-        jogos_menu.addAction(refresh_action)
+            const target = parseInt(match[1]);
+            let current = 0;
+            const increment = Math.max(1, Math.floor(target / 40));
+            const suffix = text.replace(match[1], '');
 
-        jogos_menu.addSeparator()
+            const timer = setInterval(() => {
+                current += increment;
+                if (current >= target) {
+                    current = target;
+                    clearInterval(timer);
+                }
+                el.textContent = current + suffix;
+            }, 30);
+        }
 
-        quit_action = QAction("Sair", self)
-        quit_action.setShortcut("Ctrl+Q")
-        quit_action.triggered.connect(QApplication.quit)
-        jogos_menu.addAction(quit_action)
+        // Subtle parallax on hero particles
+        document.addEventListener('mousemove', (e) => {
+            const particles = document.querySelectorAll('.particle');
+            const x = (e.clientX / window.innerWidth - 0.5) * 20;
+            const y = (e.clientY / window.innerHeight - 0.5) * 20;
 
-        # Menu Configurações
-        settings_menu = menu_bar.addMenu("Configurações")
-
-        prefs_action = QAction("Preferências", self)
-        prefs_action.triggered.connect(self._open_settings)
-        settings_menu.addAction(prefs_action)
-
-        # Menu Ajuda
-        help_menu = menu_bar.addMenu("Ajuda")
-
-        about_action = QAction("Sobre", self)
-        about_action.triggered.connect(self._show_about)
-        help_menu.addAction(about_action)
-
-    def _connect_signals(self):
-        # Carrossel → detalhes
-        self._carousel.game_selected.connect(self._on_game_selected)
-
-        # Detalhes → ações
-        self._detail_panel.play_requested.connect(self._on_play)
-        self._detail_panel.favorite_toggled.connect(self._on_toggle_favorite)
-        self._detail_panel.settings_requested.connect(self._on_game_settings)
-
-        # Notificações → toast
-        self.notification_service.toast_requested.connect(self._toast.show_toast)
-
-        # Play tracker
-        self.play_tracker.game_launched.connect(
-            lambda gid: self.notification_service.info("Jogo iniciado!")
-        )
-        self.play_tracker.game_closed.connect(self._on_game_closed)
-
-        # Save watcher
-        self.save_watcher.sync_started.connect(
-            lambda gid: self.notification_service.info("Sincronizando saves...")
-        )
-        self.save_watcher.sync_completed.connect(self._on_sync_done)
-
-    def _load_games(self):
-        """Carrega todos os jogos do banco e popula o carrossel."""
-        self._all_games.clear()
-
-        with self.db.session() as sess:
-            games = sess.query(GameModel).order_by(
-                GameModel.is_favorite.desc(),
-                GameModel.last_played.desc().nullslast(),
-                GameModel.name,
-            ).all()
-
-            for g in games:
-                self._all_games.append(_game_model_to_data(g))
-
-        self._carousel.set_games(self._all_games)
-
-        # Restaura último selecionado
-        last_id = self.settings.get("last_selected_game_id")
-        if last_id:
-            for i, g in enumerate(self._all_games):
-                if g.id == last_id:
-                    self._on_game_selected(g)
-                    return
-
-        if self._all_games:
-            self._on_game_selected(self._all_games[0])
-
-    def _on_game_selected(self, game: GameData):
-        self._current_game = game
-        self._detail_panel.set_game(game)
-        self.settings.set("last_selected_game_id", game.id)
-
-        # Atualiza status de sync
-        status = self.sync_manager.get_sync_status(game.name)
-        if status["synced"]:
-            from utils.helpers import human_readable_size
-            self._detail_panel.update_sync_status(
-                True, f"{status['files']} arquivos ({human_readable_size(status['size'])})"
-            )
-        else:
-            self._detail_panel.update_sync_status(False, "Não sincronizado")
-
-        # Background dinâmico
-        self._update_background(game)
-
-    def _update_background(self, game: GameData):
-        """Atualiza o background da janela com a imagem do jogo."""
-        bg_path = game.background_url or game.banner_path
-        if bg_path and os.path.exists(bg_path):
-            pixmap = QPixmap(bg_path)
-            if not pixmap.isNull():
-                scaled = pixmap.scaled(
-                    self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
-                )
-                self._bg_label.setPixmap(scaled)
-                self._bg_label.setGeometry(0, 0, self.width(), self.height())
-                self._bg_label.lower()
-                self._overlay.setGeometry(0, 0, self.width(), self.height())
-                self._overlay.lower()
-                return
-
-        # Sem imagem — limpa
-        self._bg_label.clear()
-
-    def _on_play(self, game_id: int):
-        with self.db.session() as sess:
-            game = sess.get(GameModel, game_id)
-            if not game:
-                self.notification_service.error("Jogo não encontrado no banco.")
-                return
-
-            exe = game.executable_path
-            if not os.path.isfile(exe):
-                self.notification_service.error(f"Executável não encontrado:\n{exe}")
-                return
-
-            success = self.play_tracker.launch_game(game_id, exe)
-            if success:
-                self.notification_service.success(f"Iniciando {game.name}...")
-            else:
-                self.notification_service.error(f"Falha ao iniciar {game.name}")
-
-    def _on_game_closed(self, game_id: int, duration: float):
-        from utils.helpers import format_playtime
-        self._load_games()  # Atualiza horas na UI
-        self.notification_service.info(
-            f"Sessão encerrada — {format_playtime(duration)}"
-        )
-
-    def _on_toggle_favorite(self, game_id: int):
-        with self.db.session() as sess:
-            game = sess.get(GameModel, game_id)
-            if game:
-                game.is_favorite = not (game.is_favorite or False)
-        self._load_games()
-
-    def _on_game_settings(self, game_id: int):
-        """Abre diálogo de configuração de save para um jogo específico."""
-        from PySide6.QtWidgets import QFileDialog
-
-        with self.db.session() as sess:
-            game = sess.get(GameModel, game_id)
-            if not game:
-                return
-
-            current = game.save_folder or ""
-            folder = QFileDialog.getExistingDirectory(
-                self, f"Selecionar pasta de saves — {game.name}", current
-            )
-            if folder:
-                game.save_folder = folder
-
-                # Cria ou atualiza perfil de save
-                profile = sess.query(SaveProfileModel).filter_by(game_id=game_id).first()
-                if not profile:
-                    profile = SaveProfileModel(
-                        game_id=game_id,
-                        save_folder=folder,
-                        sync_enabled=self.settings.get("save_sync_enabled", False),
-                    )
-                    sess.add(profile)
-                else:
-                    profile.save_folder = folder
-
-        # Atualiza watcher
-        self.save_watcher.remove_game_watch(game_id)
-        self.save_watcher.add_game_watch(game_id, folder)
-
-        self._load_games()
-        self.notification_service.success(f"Pasta de saves configurada para {game.name}")
-
-    def _on_sync_done(self, game_id: int):
-        if self._current_game and self._current_game.id == game_id:
-            status = self.sync_manager.get_sync_status(self._current_game.name)
-            if status["synced"]:
-                from utils.helpers import human_readable_size
-                self._detail_panel.update_sync_status(
-                    True, f"{status['files']} arquivos ({human_readable_size(status['size'])})"
-                )
-
-    def _add_game(self):
-        dialog = AddGameDialog(
-            self.metadata_service, self.image_service, self
-        )
-        if dialog.exec() == AddGameDialog.Accepted and dialog.result_data:
-            data = dialog.result_data
-            self._save_new_game(data)
-
-    def _save_new_game(self, data: dict):
-        """Salva um novo jogo no banco e configura monitoramento."""
-        with self.db.session() as sess:
-            # Verifica se já existe
-            existing = sess.query(GameModel).filter_by(
-                executable_path=data["executable_path"]
-            ).first()
-            if existing:
-                self.notification_service.warning("Este jogo já está na biblioteca.")
-                return
-
-            game = GameModel(
-                name=data["name"],
-                executable_path=data["executable_path"],
-                save_folder=data.get("save_folder", ""),
-                genre=data.get("genre", ""),
-                platform=data.get("platform", "PC"),
-                developer=data.get("developer", ""),
-                description=data.get("description", ""),
-                cover_path=data.get("cover_path", ""),
-                banner_path=data.get("banner_path", ""),
-            )
-            sess.add(game)
-            sess.flush()  # Obtém o ID
-
-            game_id = game.id
-
-            # Cria perfil de save se informado
-            if data.get("save_folder"):
-                profile = SaveProfileModel(
-                    game_id=game_id,
-                    save_folder=data["save_folder"],
-                    sync_enabled=self.settings.get("save_sync_enabled", False),
-                )
-                sess.add(profile)
-
-        # Configura watcher
-        if data.get("save_folder"):
-            self.save_watcher.add_game_watch(game_id, data["save_folder"])
-
-        self._load_games()
-        self.notification_service.success(f"'{data['name']}' adicionado à biblioteca!")
-
-    def _on_search(self, text: str):
-        """Filtra jogos no carrossel por nome."""
-        query = text.strip().lower()
-        if not query:
-            self._carousel.set_games(self._all_games)
-            return
-
-        filtered = [g for g in self._all_games if query in g.name.lower()]
-        self._carousel.set_games(filtered)
-
-    def _open_settings(self):
-        dialog = SettingsDialog(self.settings, self.sync_manager, self)
-        dialog.exec()
-
-    def _show_about(self):
-        QMessageBox.about(
-            self,
-            "Sobre",
-            f"<h2 style='color: #e8c547;'>{APP_NAME}</h2>"
-            f"<p>Versão 1.0.0</p>"
-            f"<p>Game Launcher profissional com sincronização automática "
-            f"de saves via GitHub.</p>"
-            f"<p>Desenvolvido com Python + PySide6</p>",
-        )
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._bg_label.setGeometry(0, 0, self.width(), self.height())
-        self._overlay.setGeometry(0, 0, self.width(), self.height())
-        self._toast.setGeometry(
-            self.width() - 380, 20, 360, 56
-        )
+            particles.forEach((p, i) => {
+                const factor = (i + 1) * 0.3;
+                p.style.transform = `translate(${x * factor}px, ${y * factor}px)`;
+            });
+        });
+    </script>
+</body>
+</html>
